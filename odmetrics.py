@@ -7,6 +7,19 @@
 # Author      : Antoni Burguera - antoni dot burguera at uib dot es
 # History     : 27-Dec-2022 - Creation.
 #               17-Feb-2023 - Refactor.
+#               16-May-2023 - Corrected error computing numGTLabels in
+#                             compute_metrics.
+#                             Considered some special cases in compute_map.
+#                             Considered empty file in load_yolo_labels.
+#                             Added function build_labeled_image.
+#                             Minor improvements to plot_rp_curve.
+#               17-May-2023 - Added get_best_configuration_multiclass
+#                             Updated get_best_configuration to minimize
+#                             false positives and negatives.
+#                             Updated print_explored_configuration to work
+#                             with get_best_configuration_multiclass.
+#                             Added group_exploration
+#                             Added plot_exploration_multiclass
 ###############################################################################
 
 ###############################################################################
@@ -17,6 +30,9 @@ import sys, os
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import warnings
+from prettytable import PrettyTable
+import cv2
 
 ###############################################################################
 # MAIN FUNCTIONS
@@ -62,11 +78,14 @@ def compute_metrics(predLabels,gtLabels,iouThresholds,theClasses):
         # If no associations at all, that's all.
         if len(forwardData)==0:
             for curThreshold in iouThresholds:
-                allResults.append([curClass,curThreshold,[],[],0])
+                allResults.append([curClass,curThreshold,[0],[0],0])
             break
         # Precompute values
-        numGTLabels=sum([len(x) for x in gtLabels])
+        # Number of ground truth items for the current class
+        numGTLabels=len([lblData for imgData in gtLabels for lblData in imgData if lblData[0]==curClass])
+        # Number of associated items
         numDataItems=len(forwardData)
+
         # For each threshold
         for curThreshold in iouThresholds:
             # To integrate, we must ensure the whole Recall-Precision curve is used.
@@ -184,7 +203,13 @@ def explore_parameters(predLabels,gtLabels,iouThresholds,confThresholds,theClass
 # Output : theMap - The requested mAP.
 # =============================================================================
 def compute_mAP(theResults,iouThresholds,theClasses):
-    return np.mean([np.mean([x[-1] for x in theResults if x[1] in iouThresholds and x[0]==curClass]) for curClass in theClasses])
+    outData=[]
+    for curResult in theResults:
+        if curResult[1] in iouThresholds and curResult[0] in theClasses:
+            outData.append(curResult[-1])
+    if len(outData)==0:
+        return 0
+    return np.mean(outData)
 
 # =============================================================================
 # GET_BEST_CONFIGURATION
@@ -201,7 +226,59 @@ def compute_mAP(theResults,iouThresholds,theClasses):
 # Output : The full optimal row of theExploration.
 # =============================================================================
 def get_best_configuration(theExploration,targetMetric=5,theClass=0):
-    return theExploration[np.argmax([x[targetMetric+3] for x in theExploration if x[0]==theClass])]
+    # Predefine stuff
+    confToMaximize=[0,3,4,5]
+    # Maximize or minimize
+    if targetMetric in confToMaximize:
+        return theExploration[np.argmax([x[targetMetric+3] for x in theExploration if x[0]==theClass])]
+    else:
+        return theExploration[np.argmin([x[targetMetric+3] for x in theExploration if x[0]==theClass])]
+
+# =============================================================================
+# GET_BEST_CONFIGURATION_MULTICLASS
+# Finds the best configuration for the specified class/es and target. If more
+# than one class is provided, the configuration es searched for all the classes
+# together.
+# Input  : theExploration - Output of explore_parameters
+#          targetMetric - The specific metric to maximize:
+#                         0: True Positives
+#                         1: False Positives
+#                         2: False Negatives
+#                         3: Recall
+#                         4: Precision
+#                         5: F1-Score
+#          theClasses - List of class id to explore
+# Output : The full optimal row of theExploration except for the first
+#          cell, which, instead of containing one integer (the class id) it
+#          contains a list (theClasses).
+# =============================================================================
+def get_best_configuration_multiclass(theExploration,targetMetric,theClasses):
+    # Predefine stuff
+    confToMaximize=[0,3,4,5]
+    # Get TP, FP, FN grouped by classes
+    confDict=group_exploration(theExploration,theClasses)
+    # Compute precision, recall and F1-Score
+    for curKey in confDict:
+        [tp,fp,fn]=confDict[curKey]
+
+        thePrecision=tp/(tp+fp)
+        theRecall=tp/(tp+fn)
+        # Safely compute F1-Score
+        if thePrecision+theRecall==0:
+            theF1=0
+        else:
+            theF1=2*(thePrecision*theRecall)/(thePrecision+theRecall)
+        confDict[curKey]=[tp,fp,fn]+[thePrecision,theRecall,theF1]
+    # Convert to nparray. Each item list is:
+    # IoU,ConfThreshold,tp,fp,fn,precision, recall,F1-Score
+    theData=np.array([[*k,*v] for k,v in confDict.items()])
+    # Maximize or minimize
+    if targetMetric in confToMaximize:
+        idxOpt=np.argmax(theData[:,2+targetMetric])
+    else:
+        idxOpt=np.argmin(theData[:,2+targetMetric])
+
+    return [theClasses]+list(theData[idxOpt,:])
 
 ###############################################################################
 # LABEL MANAGEMENT FUNCTIONS
@@ -249,11 +326,17 @@ def convert_labels(theLabels,imgWidth,imgHeight,theConversion):
 #                      or empty array if no labels.
 # =============================================================================
 def load_yolo_labels(fileName,outputFormat,imgWidth,imgHeight):
-    theLabels=np.loadtxt(fileName,delimiter=' ')
-    if len(theLabels)!=0 and len(theLabels.shape)==1:
-        theLabels=theLabels.reshape((1,theLabels.shape[0]))
-    if outputFormat==0:
-        theLabels=convert_labels(theLabels,imgWidth,imgHeight,outputFormat)
+    if os.path.exists(fileName):
+        # Load and dismiss warnings if empty file
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            theLabels=np.loadtxt(fileName,delimiter=' ')
+        if len(theLabels)!=0 and len(theLabels.shape)==1:
+            theLabels=theLabels.reshape((1,theLabels.shape[0]))
+        if outputFormat==0:
+            theLabels=convert_labels(theLabels,imgWidth,imgHeight,outputFormat)
+    else:
+        theLabels=[]
     return np.array(theLabels)
 
 # =============================================================================
@@ -311,16 +394,51 @@ def plot_labeled_image(theImage,theLabels,showClass=False,boxColor='w'):
     plt.show()
 
 # =============================================================================
+# build_labeled_image
+# Plots labels (in ABSOLUTE format) into the image. Modifies the input image.
+# Differs from plot_labeled_image in:
+# * build_labeled_image does not plot anything, just modifies the image to
+#   include the labels.
+# * build_labeled_image displays the bounding boxes in a format closer to
+#   that of YOLOv5.
+# * build_labeled_image uses OpenCV (that's neither good nor bad, just a
+#   convenience to keep close to an existing implementation. See Note.)
+# Input  : theImage - Image to annotate.
+#          theLabels - Labels in ABSOLUTE format.
+# Output : No explicit output, but modifies the input image.
+# Note   : Based on https://github.com/waittim/draw-YOLO-box
+# =============================================================================
+def build_labeled_image(theImage,theLabels):
+    lineThickness=round(0.002*(theImage.shape[0]+theImage.shape[1])/2)+1
+    fontThickness=max(lineThickness-1,1)
+    for curLabel in theLabels:
+        startPoint=(int(curLabel[1]),int(curLabel[2]))
+        endPoint=(int(curLabel[3]),int(curLabel[4]))
+        cv2.rectangle(theImage,startPoint,endPoint,color=255,thickness=lineThickness,lineType=cv2.LINE_AA)
+        txtLabel=str(int(curLabel[0]))
+        txtSize=cv2.getTextSize(txtLabel,0,fontScale=lineThickness/3,thickness=fontThickness)[0]
+        endPoint=startPoint[0]+txtSize[0],startPoint[1]-txtSize[1]-3
+        cv2.rectangle(theImage,startPoint,endPoint,255,-1,cv2.LINE_AA)
+        cv2.putText(theImage,txtLabel,(startPoint[0],startPoint[1]-2),0,lineThickness/3,0,thickness=fontThickness,lineType=cv2.LINE_AA)
+
+# =============================================================================
 # PLOT_RP_CURVES
 # Plot the Recall-Precision curves for the requested class and IoU values.
 # Input  : theResults - Output of compute_metrics.
+#          iouValues - Iterable of IoU values to use.
+#          theClass - Iterable of classes to use. If single class, an int is
+#                     also allowed.
+#          theTitle - Figure title or None to not have title.
 # =============================================================================
-def plot_rp_curves(theResults,iouValues,theClass=0):
+def plot_rp_curves(theResults,iouValues,theClass=0,theTitle=None):
+    # Wrapper to allow programs using previous versions to work.
+    if type(theClass) is int:
+        theClass=[theClass]
     # Get the curves
     outCurves=[]
     outLegends=[]
     for curIoU in iouValues:
-        curResult=next(([x[2],x[3],x[4]] for x in theResults if x[0]==theClass and x[1]==curIoU),None)
+        curResult=next(([x[2],x[3],x[4]] for x in theResults if x[0] in theClass and x[1]==curIoU),None)
         outCurves.append(curResult)
         outLegends.append('IoU>=%.3f, AP=%.3f'%(curIoU,curResult[-1]))
     # Check possible error
@@ -334,6 +452,9 @@ def plot_rp_curves(theResults,iouValues,theClass=0):
     plt.grid('on')
     plt.xlabel('Recall')
     plt.ylabel('Precision')
+    if not (theTitle is None):
+        plt.title(theTitle)
+    plt.show()
 
 # =============================================================================
 # PLOT_EXPLORATION
@@ -368,12 +489,76 @@ def plot_exploration(theExploration,metricToShow=5,theClass=0):
     plt.show()
 
 # =============================================================================
+# PLOT_EXPLORATION_MULTICLASS
+# Plots the results of explore_parameters grouping data in the specified
+# classes-
+# Input  : theExploration - Output of explore_parameters
+#          metricToShow - The specific metric to show:
+#                         0: True Positives
+#                         1: False Positives
+#                         2: False Negatives
+#                         3: Recall
+#                         4: Precision
+#                         5: F1-Score
+#          theClasses - List of classes to consider.
+# =============================================================================
+def plot_exploration_multiclass(theExploration,metricToShow,theClasses):
+    # Define metric names
+    metricNames=['TP','FP','FN','RECALL','PRECISION','F1-SCORE']
+    # Get the exploration data grouped by classes
+    confDict=group_exploration(theExploration,theClasses)
+    # Compute the desired metric
+    for curKey in confDict:
+        [tp,fp,fn]=confDict[curKey]
+        if metricToShow==0:
+            confDict[curKey]=tp
+        elif metricToShow==1:
+            confDict[curKey]=fp
+        elif metricToShow==2:
+            confDict[curKey]=fn
+        elif metricToShow==3:
+            confDict[curKey]=tp/(tp+fn)
+        elif metricToShow==4:
+            confDict[curKey]=tp/(tp+fp)
+        elif metricToShow==5:
+            thePrecision=tp/(tp+fp)
+            theRecall=tp/(tp+fn)
+            if thePrecision+theRecall==0:
+                theF1=0
+            else:
+                theF1=2*(thePrecision*theRecall)/(thePrecision+theRecall)
+            confDict[curKey]=theF1
+    # Convert to nparray
+    theData=np.array([[*k,v] for k,v in confDict.items()])
+
+    # Get X and Y values
+    theX=np.sort(np.unique([x[0] for x in theData]))
+    theY=np.sort(np.unique([x[1] for x in theData]))
+    # Build the Z array matching the values
+    theZ=np.array([[next(x[2] for x in theData if x[0]==curX and x[1]==curY) for curX in theX] for curY in theY])
+    # Meshgrid the X and the Y
+    theX,theY=np.meshgrid(theX,theY)
+    # Create the figure and plot everything.
+    theFigure=plt.figure()
+    theAxes=theFigure.add_subplot(projection='3d')
+    theAxes.plot_surface(theX,theY,theZ)
+    theAxes.set_xlabel('IOU THRESHOLD')
+    theAxes.set_ylabel('SCORE THRESHOLD')
+    theAxes.set_zlabel(metricNames[metricToShow])
+    plt.show()
+
+# =============================================================================
 # PRINT_EXPLORED_CONFIGURATION
 # Simple helper function to print one row of the explore_parameters output.
 # Input  : exploredConfiguration - Row of explore_parameters.
 # =============================================================================
 def print_explored_configuration(exploredConfiguration):
-    strHeaders=['* CLASS           : %d',
+    theConfiguration=exploredConfiguration.copy()
+    if type(theConfiguration[0]) is int:
+        theConfiguration[0]=str(exploredConfiguration[0])
+    else:
+        theConfiguration[0]=','.join([str(x) for x in exploredConfiguration[0]])
+    strHeaders=['* CLASS           : %s',
                 '* IOU THRESHOLD   : %.3f',
                 '* SCORE THRESHOLD : %.3f',
                 '* TP              : %d',
@@ -383,8 +568,32 @@ def print_explored_configuration(exploredConfiguration):
                 '* PRECISION       : %.3f',
                 '* F1-SCORE        : %.3f'
                 ]
-    for i,v in enumerate(exploredConfiguration):
+    for i,v in enumerate(theConfiguration):
         print(strHeaders[i]%v)
+
+# =============================================================================
+# PRINT_EXPLORATION_SUMMARY
+# For the specified metric,  searches the optimal configuration for each class
+# (individually) and all together. Prints a table summarizing the results.
+# Input  : theExploration - Output of explore_parameters
+#          classesToEvaluate - List of class id to evaluate.
+#          classNames - Names (to print) of the classes in classesToEvaluate
+#          metricToOptimize - The metric to optimize:
+#                               0: True Positives
+#                               1: False Positives
+#                               2: False Negatives
+#                               3: Recall
+#                               4: Precision
+#                               5: F1-Score
+# =============================================================================
+def print_exploration_summary(theExploration,classesToEvaluate,classNames,metricToOptimize=5):
+    theTable=PrettyTable(['CLASS','IoU','CONF','TP','FP','FN','R','P','F1-SCORE'])
+    for iClass,curClass in enumerate(classesToEvaluate):
+        bestConfig=get_best_configuration_multiclass(theExploration,metricToOptimize,[curClass])
+        theTable.add_row([classNames[iClass],round(bestConfig[1],3),round(bestConfig[2],3),int(bestConfig[3]),int(bestConfig[4]),int(bestConfig[5]),round(bestConfig[6],3),round(bestConfig[7],3),round(bestConfig[8],3)])
+    bestConfig=get_best_configuration_multiclass(theExploration,metricToOptimize,classesToEvaluate)
+    theTable.add_row(['ALL',round(bestConfig[1],3),round(bestConfig[2],3),int(bestConfig[3]),int(bestConfig[4]),int(bestConfig[5]),round(bestConfig[6],3),round(bestConfig[7],3),round(bestConfig[8],3)])
+    print(theTable)
 
 ###############################################################################
 # AUXILIARY FUNCTIONS
@@ -431,3 +640,26 @@ def compute_IoU(firstLabel,secondLabel):
 # =============================================================================
 def associate_labels(lblA,lblB,theClass=0):
     return [max([compute_IoU(x,y) for y in lblB if y[0]==theClass],default=0) for x in lblA if x[0]==theClass]
+
+# =============================================================================
+# GROUP_EXPLORATION
+# Given the results of explore_parameters, groups the results (only tp, fp and
+# fn) by the specified class or classes.
+# Input : theExploration - Output of explore_parameters
+#       : theClasses - List with the class or classes to group the data.
+# =============================================================================
+def group_exploration(theExploration,theClasses):
+    # Get TP, FP, FN grouped by classes
+    confDict={}
+    for curData in theExploration:
+        if curData[0] in theClasses:
+            theKey=tuple(curData[1:3])
+            if theKey in confDict:
+                [tp,fp,fn]=confDict[theKey]
+            else:
+                tp=fp=fn=0
+            tp+=curData[3]
+            fp+=curData[4]
+            fn+=curData[5]
+            confDict[theKey]=[tp,fp,fn]
+    return confDict

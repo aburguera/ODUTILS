@@ -15,13 +15,20 @@ This repository provides two modules:
 
 Reference to be posted soon. Please contact us.
 
+## Update (17-May-2023) notes
+
+Some minor corrections and major additions have been performed to odmetrics. The additions are mostly related to help in evaluating multi-class object detection. Check *evaluate_with_files.py* to see a full example (though this file was for internal use, it is quite useful to understand the additions).
+
+Please note that these additions are (literally) additions. No refactor has been performed after that, so there is duplicated code and sub-optimal (to say it in a nice way) algorithms.
+
 ## Basic usage
 
-The repository provides three usage examples:
+The repository provides four usage examples:
 
 * **example_train.py**: This code shows how *yolov5.train* can be used.
 * **example_detect.py**: This code shows chow *yolov5.detect_with_torch* can be used. No demo file for *yolov5.detect* since in most cases *yolov5.detect_with_torch* is a better choice.
 * **example_odmetrics.py**: This code exemplifies how *odmetrics* can be used both to compute metrics with *odmetrics.compute_metrics* and to explore the parameter space with *odmetrics.explore_parameters*.
+* **evaluate_with_files.py**: This is a utility program intended for our internal use, but it serves as example too. It provides some stats (using odmetrics) from YOLOv5 detections stored in files.
 
 The examples are fully commented.
 
@@ -45,7 +52,10 @@ The **example_** files contain examples that fit most of the use cases. Also, al
 * **yolov5** and **odmetrics**:
     + matplotlib==3.1.2
     + numpy==1.17.4
+    + opencv_python==4.6.0.66
+    + prettytable==3.7.0
     + scikit_image==0.18.1
+    + skimage==0.0
     + torch==1.11.0+cu113
 * **YOLOv5** (that is, the *true* [YOLOv5 by Ultralytics](https://github.com/ultralytics/yolov5/) ):
     + Check the corresponding requirements.txt file.
